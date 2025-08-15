@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>Kendo Grid Server vs Client Sorting/Paging Perf Test</title>
+  <link rel="stylesheet" href="https://kendo.cdn.telerik.com/2024.2.514/styles/kendo.default-v2.min.css" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 0; }
+    header { padding: 12px 16px; border-bottom: 1px solid #eee; }
+    .split { display: grid; grid-template-rows: 1fr 1fr; height: calc(100vh - 56px); }
+    section { padding: 12px 16px; border-bottom: 1px solid #eee; }
+    .toolbar { display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap: wrap;}
+    .metrics { display:flex; gap:16px; flex-wrap: wrap; font-size: 14px; color:#444; }
+    .metrics b { color:#000; }
+    .right { margin-left: auto; }
+    .k-grid-container {overflow-y: scroll;}
+    #gridServer, #gridClient { height: calc(100% - 80px); overflow: hidden;}
+    input[type="number"] { width: 140px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h2>Server vs Client Sorting/Paging — Kendo UI Grid 성능 비교</h2>
+  </header>
+
+  <div class="split">
+    <!-- 상단: 서버 처리 -->
+    <section>
+      <div class="toolbar">
+        <button id="btnServerFetch" class="k-button k-button-md k-rounded-md k-button-solid k-button-solid-base">상단 다시 불러오기 (서버 처리)</button>
+        <div class="metrics">
+          <span>네트워크 왕복: <b id="m_server_rtt">-</b> ms</span>
+          <span>서버 쿼리시간: <b id="m_server_q">-</b> ms</span>
+          <span>서버 힙: <b id="m_server_heap">-</b> MB</span>
+          <span>반환 행수: <b id="m_server_rows">-</b></span>
+        </div>
+        <div class="right">페이지/정렬 변경 시에도 다시 측정됩니다.</div>
+      </div>
+      <div id="gridServer"></div>
+    </section>
+
+    <!-- 하단: 클라이언트 처리 -->
+    <section>
+      <div class="toolbar">
+        <button id="btnClientFetch" class="k-button k-button-md k-rounded-md k-button-solid k-button-solid-base">하단 다시 불러오기 (클라이언트 처리)</button>
+        <label>limit(옵션): <input id="clientLimit" type="number" placeholder="비우면 전체" /></label>
+        <div class="metrics">
+          <span>네트워크 왕복: <b id="m_client_rtt">-</b> ms</span>
+          <span>서버 쿼리시간: <b id="m_client_q">-</b> ms</span>
+          <span>서버 힙: <b id="m_client_heap">-</b> MB</span>
+          <span>반환 행수: <b id="m_client_rows">-</b></span>
+        </div>
+        <div class="right">하단 Grid는 전체를 받아 로컬 정렬/페이징을 수행합니다.</div>
+      </div>
+      <div id="gridClient"></div>
+    </section>
+  </div>
+
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://kendo.cdn.telerik.com/2024.2.514/js/kendo.all.min.js"></script>
+  <script>
+    // 상단(서버 처리) — 파라미터 직렬화
+    function toBackendRequest(options) {
+      const sorts = (options.sort || []).map(s => ({ field: s.field, dir: s.dir }));
+      return {
+        page: options.page || 1,
+        pageSize: options.pageSize || 50,
+        sort: sorts
+      };
+    }
+
+    // --- 상단 Grid (서버 처리) ---
+    (function initServerGrid() {
+      let tStart = 0;
+
+      const ds = new kendo.data.DataSource({
+        transport: {
+          read: {
+            url: "/api/ss/members",   // 같은 3001 앱에서 서빙
+            type: "POST",
+            contentType: "application/json",
+            dataType: "json"
+          },
+          parameterMap: function(options, type) {
+            if (type === "read") return kendo.stringify(toBackendRequest(options));
+          }
+        },
+        schema: {
+          data: "items",
+          total: "total",
+          model: {
+            fields: {
+              id: { type: "number" },
+              name: { type: "string" },
+              email: { type: "string" },
+              status: { type: "string" },
+              age: { type: "number" },
+              score: { type: "number" },
+              joinedAt: { type: "date" }
+            }
+          }
+        },
+        serverPaging: true,
+        serverSorting: true,
+        pageSize: 100,
+        requestStart: function() { tStart = performance.now(); },
+        requestEnd: function(e) {
+          const rtt = Math.round(performance.now() - tStart);
+          $("#m_server_rtt").text(rtt);
+          if (e.response && e.response.server) {
+            $("#m_server_q").text(e.response.server.queryMs);
+            $("#m_server_heap").text(e.response.server.heapUsedMB);
+            $("#m_server_rows").text(e.response.server.rowsReturned);
+          }
+        }
+      });
+
+      $("#gridServer").kendoGrid({
+        dataSource: ds,
+        height: $("#gridServer").height(),
+        sortable: true,
+        pageable: {
+          refresh: true,
+          pageSizes: [50, 100, 200, 500],
+          buttonCount: 5
+        },
+        columns: [
+          { field: "id", title: "ID", width: 90 },
+          { field: "name", title: "이름", width: 160 },
+          { field: "email", title: "이메일", width: 220 },
+          { field: "status", title: "상태", width: 120 },
+          { field: "age", title: "나이", width: 100 },
+          { field: "score", title: "점수", width: 100, format: "{0:n2}" },
+          { field: "joinedAt", title: "가입일", width: 160, format: "{0:yyyy-MM-dd HH:mm}" }
+        ]
+      });
+
+      $("#btnServerFetch").on("click", function() {
+        ds.read();
+      });
+
+      // 첫 로드
+      ds.read();
+    })();
+
+
+    // --- 하단 Grid (클라이언트 처리) ---
+    (function initClientGrid() {
+      let tStart = 0;
+
+      const ds = new kendo.data.DataSource({
+        transport: {
+          read: function(options) {
+            const limit = $("#clientLimit").val();
+            const url = limit
+              ? `http://localhost:3002/api/cs/members/all?limit=${encodeURIComponent(limit)}`
+              : `http://localhost:3002/api/cs/members/all`;
+
+            tStart = performance.now();
+            $.ajax({
+              url,
+              method: "GET",
+              dataType: "json",
+              success: function(resp) { options.success(resp); },
+              error: function(xhr) { options.error(xhr); }
+            });
+          }
+        },
+        schema: {
+          data: "items",
+          total: "total",
+          model: {
+            fields: {
+              id: { type: "number" },
+              name: { type: "string" },
+              email: { type: "string" },
+              status: { type: "string" },
+              age: { type: "number" },
+              score: { type: "number" },
+              joinedAt: { type: "date" }
+            }
+          }
+        },
+        // 클라이언트에서 정렬/페이징
+        serverPaging: false,
+        serverSorting: false,
+        pageSize: 100,
+        requestEnd: function(e) {
+          const rtt = Math.round(performance.now() - tStart);
+          const $mClientRtt = $("#m_client_rtt");
+          if ($mClientRtt.text() === "-") $mClientRtt.text(rtt);
+          if (e.response && e.response.server) {
+            $("#m_client_q").text(e.response.server.queryMs);
+            $("#m_client_heap").text(e.response.server.heapUsedMB);
+            $("#m_client_rows").text(e.response.server.rowsReturned);
+          }
+        }
+      });
+
+      $("#gridClient").kendoGrid({
+        dataSource: ds,
+        height: $("#gridClient").height(),
+        sortable: true,
+        pageable: {
+          refresh: true,
+          pageSizes: [50, 100, 200, 500],
+          buttonCount: 5
+        },
+        columns: [
+          { field: "id", title: "ID", width: 90 },
+          { field: "name", title: "이름", width: 160 },
+          { field: "email", title: "이메일", width: 220 },
+          { field: "status", title: "상태", width: 120 },
+          { field: "age", title: "나이", width: 100 },
+          { field: "score", title: "점수", width: 100, format: "{0:n2}" },
+          { field: "joinedAt", title: "가입일", width: 160, format: "{0:yyyy-MM-dd HH:mm}" }
+        ]
+      });
+
+      $("#btnClientFetch").on("click", function() {
+        ds.read();
+      });
+
+      // 첫 로드
+      ds.read();
+    })();
+  </script>
+</body>
+</html>
